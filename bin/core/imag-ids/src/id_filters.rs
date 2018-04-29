@@ -86,6 +86,353 @@ impl<'a, A> Filter<StoreId> for IsInCollectionsFilter<'a, A>
 ///     "values"
 /// ```
 ///
-mod header_filter_lang {
+pub mod header_filter_lang {
+    use std::str;
+    use std::str::FromStr;
+    use std::process::exit;
+
+    use nom::digit;
+    use nom::whitespace::sp;
+
+    use libimagstore::store::Entry;
+    use libimagerror::trace::MapErrTrace;
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum Unary {
+        Not
+    }
+
+    named!(unary_operator<Unary>, alt_complete!(
+        tag!("not") => { |_| Unary::Not }
+    ));
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum CompareOp {
+        OpIs,
+        OpIn,
+        OpEq,
+        OpNeq,
+        OpGte, // >=
+        OpLte, // <=
+        OpLt,  // <
+        OpGt,  // >
+    }
+
+    named!(compare_op<CompareOp>, alt_complete!(
+        tag!("is"     ) => { |_| CompareOp::OpIs }  |
+        tag!("in"     ) => { |_| CompareOp::OpIn }  |
+        tag!("==/eq"  ) => { |_| CompareOp::OpEq }  |
+        tag!("!=/neq" ) => { |_| CompareOp::OpNeq } |
+        tag!(">="     ) => { |_| CompareOp::OpGte } |
+        tag!("<="     ) => { |_| CompareOp::OpLte } |
+        tag!("<"      ) => { |_| CompareOp::OpLt }  |
+        tag!(">"      ) => { |_| CompareOp::OpGt }
+    ));
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum Operator {
+        Or,
+        And,
+        Xor,
+    }
+
+    named!(operator<Operator>, alt_complete!(
+        tag!("or")      => { |_| Operator::Or }     |
+        tag!("and")     => { |_| Operator::And }    |
+        tag!("xor")     => { |_| Operator::Xor }
+    ));
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum Function {
+        Length,
+        Keys,
+        Values,
+    }
+
+    named!(function<Function>, alt_complete!(
+        tag!("length") => { |_| Function::Length } |
+        tag!("keys")   => { |_| Function::Keys }   |
+        tag!("values") => { |_| Function::Values }
+    ));
+
+    enum Value {
+        Integer(i64),
+        String(String),
+    }
+
+    named!(integer<i64>, alt!(
+        map_res!(
+            map_res!(
+                ws!(digit),
+                str::from_utf8
+            ),
+            i64::from_str
+        )
+    ));
+
+    named!(string<String>, do_parse!(
+       text: delimited!(char!('('), is_not!(")"), char!(')'))
+       >> (String::from_utf8(text.to_vec()).unwrap())
+    ));
+
+    named!(val<Value>, alt_complete!(
+        do_parse!(number: integer >> (Value::Integer(number))) |
+        do_parse!(text: string >> (Value::String(text)))
+    ));
+
+    named!(list_of_val<Vec<Value>>, do_parse!(
+            char!('[') >> list: many0!(val) >> char!(']') >> (list)
+    ));
+
+    enum CompareValue {
+        Value(Value),
+        Values(Vec<Value>)
+    }
+
+    named!(compare_value<CompareValue>, alt_complete!(
+        do_parse!(list: list_of_val >> (CompareValue::Values(list))) |
+        do_parse!(val: val >> (CompareValue::Value(val)))
+    ));
+
+    enum Selector {
+        Direct(String),
+        Function(Function, String)
+    }
+
+    impl Selector {
+        fn selector_str(&self) -> &String {
+            match *self {
+                Selector::Direct(ref s)      => s,
+                Selector::Function(_, ref s) => s,
+            }
+        }
+        fn function(&self) -> Option<&Function> {
+            match *self {
+                Selector::Direct(_)          => None,
+                Selector::Function(ref f, _) => Some(f),
+            }
+        }
+    }
+
+    named!(selector_str<String>, do_parse!(
+        selector: take_till!(|s: u8| s.is_ascii_whitespace()) >> (String::from_utf8(selector.to_vec()).unwrap())
+    ));
+
+    named!(selector<Selector>, alt_complete!(
+        do_parse!(fun: function >> sp >> sel: selector_str >> (Selector::Function(fun, sel))) |
+        do_parse!(sel: selector_str >> (Selector::Direct(sel)))
+    ));
+
+    struct Filter {
+        unary            : Option<Unary>,
+        selector         : Selector,
+        compare_operator : CompareOp,
+        compare_value    : CompareValue,
+    }
+
+    named!(filter<Filter>, do_parse!(
+            unary: opt!(unary_operator) >>
+            selec: selector >>
+            comop: compare_op >>
+            cmval: compare_value >>
+            (Filter {
+                unary:              unary,
+                selector:           selec,
+                compare_operator:   comop,
+                compare_value:      cmval,
+            })
+    ));
+
+    pub struct Query {
+        filter: Filter,
+        next_filters: Vec<(Operator, Filter)>,
+    }
+
+    named!(parse_query<Query>, do_parse!(
+            filt: filter >>
+            next: many0!(do_parse!(op: operator >> fil: filter >> ((op, fil)))) >>
+            (Query {
+                filter:       filt,
+                next_filters: next,
+            })
+    ));
+
+    /// Helper type which can filters::filter::Filter be implemented on so that the implementation
+    /// of ::filters::filter::Filter on self::Filter is less complex.
+    struct Comparator<'a>(&'a CompareOp, &'a CompareValue);
+
+    impl<'a> ::filters::filter::Filter<::toml::Value> for Comparator<'a> {
+        fn filter(&self, val: &::toml::Value) -> bool {
+            use self::CompareValue as CV;
+            use self::CompareOp    as CO;
+            use toml::Value        as TVal;
+
+            match *self.0 {
+                CO::OpIs => match self.1 {
+                    &CV::Values(_) => error_exit("Cannot check whether a header field is the same type as mulitple values!"),
+                    &CV::Value(ref v) => match v {
+                        &Value::Integer(_) => is_match!(*val, TVal::Integer(_)),
+                        &Value::String(_)  => is_match!(val, &TVal::String(_)),
+                    },
+                },
+                CO::OpIn => match (self.1, val) {
+                    (&CV::Value(Value::Integer(i)), &TVal::Integer(j))       => i == j,
+                    (&CV::Value(Value::String(ref s)), &TVal::String(ref b)) => s.contains(b),
+                    (&CV::Value(_), _)                                       => false,
+
+                    (&CV::Values(ref v), &TVal::Integer(j)) => v.iter().any(|e| match e {
+                        &Value::Integer(i) => i == j,
+                        _                  => false
+                    }),
+                    (&CV::Values(ref v), &TVal::String(ref b)) => v.iter().any(|e| match e {
+                        &Value::String(ref s) => s == b,
+                        _                     => false
+                    }),
+                    (&CV::Values(_), _) => false,
+                },
+                CO::OpEq => match (self.1, val) {
+                    (&CV::Value(Value::Integer(i)), &TVal::Integer(j))       => i == j,
+                    (&CV::Value(Value::String(ref s)), &TVal::String(ref b)) => s == b,
+                    (&CV::Value(_), _)  => false,
+                    (&CV::Values(_), _) => error_exit("Cannot check a header field for equality to multiple header fields!"),
+                },
+                CO::OpNeq => match (self.1, val) {
+                    (&CV::Value(Value::Integer(i)), &TVal::Integer(j)) => i != j,
+                    (&CV::Value(_), _)  => false,
+                    (&CV::Values(_), _) => error_exit("Cannot check a header field for inequality to multiple header fields!"),
+                },
+                CO::OpGte => match (self.1, val) {
+                    (&CV::Value(Value::Integer(i)), &TVal::Integer(j)) => i >= j,
+                    (&CV::Value(_), _)  => false,
+                    (&CV::Values(_), _) => error_exit("Cannot check a header field for greater_than_equal to multiple header fields!"),
+                },
+                CO::OpLte => match (self.1, val) {
+                    (&CV::Value(Value::Integer(i)), &TVal::Integer(j)) => i <= j,
+                    (&CV::Value(_), _)  => false,
+                    (&CV::Values(_), _) => error_exit("Cannot check a header field for lesser_than_equal to multiple header fields!"),
+                },
+                CO::OpLt => match (self.1, val) {
+                    (&CV::Value(Value::Integer(i)), &TVal::Integer(j)) => i < j,
+                    (&CV::Value(_), _)  => false,
+                    (&CV::Values(_), _) => error_exit("Cannot check a header field for lesser_than to multiple header fields!"),
+                },
+                CO::OpGt => match (self.1, val) {
+                    (&CV::Value(Value::Integer(i)), &TVal::Integer(j)) => i > j,
+                    (&CV::Value(_), _)  => false,
+                    (&CV::Values(_), _) => {
+                        error!("Cannot check a header field for greater_than to multiple header fields!");
+                        exit(1)
+                    },
+                },
+            }
+        }
+    }
+
+    impl ::filters::filter::Filter<Entry> for Filter {
+        fn filter(&self, entry: &Entry) -> bool {
+            use toml_query::read::TomlValueReadExt;
+
+            entry
+                .get_header()
+                .read(self.selector.selector_str())
+                .map_err_trace_exit_unwrap(1)
+                .map(|value| {
+                    let comp = Comparator(&self.compare_operator, &self.compare_value);
+                    let val = match self.selector.function() {
+                        None => {
+                            ::filters::filter::Filter::filter(&comp, value)
+                        }
+                        Some(func) => {
+                            match *func {
+                                Function::Length => {
+                                    let val = match value {
+                                        &::toml::Value::Array(ref a)  => a.len() as i64,
+                                        &::toml::Value::String(ref s) => s.len() as i64,
+                                        _                            => 1
+                                    };
+                                    let val = ::toml::Value::Integer(val);
+                                    ::filters::filter::Filter::filter(&comp, &val)
+                                },
+                                Function::Keys => {
+                                    let keys = match value {
+                                        &::toml::Value::Table(ref tab) => tab
+                                            .keys()
+                                            .cloned()
+                                            .map(::toml::Value::String)
+                                            .collect(),
+                                        _ => return false,
+                                    };
+                                    let keys = ::toml::Value::Array(keys);
+                                    ::filters::filter::Filter::filter(&comp, &keys)
+                                },
+                                Function::Values => {
+                                    let vals = match value {
+                                        &::toml::Value::Table(ref tab) => tab
+                                            .values()
+                                            .cloned()
+                                            .collect(),
+                                        _ => return false,
+                                    };
+                                    let vals = ::toml::Value::Array(vals);
+                                    ::filters::filter::Filter::filter(&comp, &vals)
+                                },
+                            }
+                        }
+                    };
+
+                    match self.unary {
+                        Some(Unary::Not) => !val,
+                        _                => val
+                    }
+                })
+                .unwrap_or(false)
+        }
+    }
+
+    impl ::filters::filter::Filter<Entry> for Query {
+
+        fn filter(&self, entry: &Entry) -> bool {
+            let mut res = self.filter.filter(entry);
+
+            for &(ref operator, ref next) in self.next_filters.iter() {
+                match *operator {
+                    Operator::Or => {
+                        res = res || ::filters::filter::Filter::filter(next, entry);
+                    },
+                    Operator::And => {
+                        res = res && ::filters::filter::Filter::filter(next, entry);
+                    },
+                    Operator::Xor => {
+                        let other = ::filters::filter::Filter::filter(next, entry);
+                        res = (res && !other) || (!res && other);
+                    },
+                }
+            }
+
+            res
+        }
+
+    }
+
+    fn error_exit(s: &'static str) -> ! {
+        error!("{}", s);
+        exit(1)
+    }
+
+    pub fn parse(s: &str) -> Query {
+        match parse_query(s.as_bytes()) {
+            ::nom::IResult::Done(_i, o) => o,
+            ::nom::IResult::Error(e) => {
+                error!("Error during parsing the query");
+                error!("Error = {:?}", e);
+                ::std::process::exit(1)
+            },
+            ::nom::IResult::Incomplete(needed) => {
+                error!("Error during parsing the query. Incomplete input.");
+                error!("Needed = {:?}", needed);
+                ::std::process::exit(1)
+            },
+        }
+    }
 }
 
