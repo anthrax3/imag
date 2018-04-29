@@ -160,15 +160,25 @@ pub mod header_filter_lang {
         String(String),
     }
 
-    named!(integer<i64>, alt!(
-        map_res!(
-            map_res!(
-                ws!(digit),
-                str::from_utf8
-            ),
-            i64::from_str
-        )
-    ));
+    named!(int64<i64>, map!(digit, |r: &[u8]| {
+        let val = str::from_utf8(r).unwrap_or_else(|e| {
+            error!("Error = '{:?}'", e);
+            ::std::process::exit(1)
+        });
+
+        i64::from_str(val).unwrap_or_else(|e| {
+            error!("Error while parsing number: '{:?}'", e);
+            ::std::process::exit(1)
+        })
+    }));
+
+    named!(signed_digits<(Option<&[u8]>, i64)>,
+        pair!(opt!(alt!(tag_s!("+") | tag_s!("-"))), int64)
+    );
+    named!(integer<i64>, do_parse!(tpl: signed_digits >> (match tpl.0 {
+        Some(b"-") => -tpl.1,
+        _          => tpl.1,
+    })));
 
     named!(string<String>, do_parse!(
        text: delimited!(char!('('), is_not!(")"), char!(')'))
@@ -433,6 +443,56 @@ pub mod header_filter_lang {
                 ::std::process::exit(1)
             },
         }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn test_unary() {
+            assert_eq!(unary_operator(b"not").unwrap().1, Unary::Not);
+        }
+
+        #[test]
+        fn test_compare_op() {
+            assert_eq!(compare_op(b"is"     ).unwrap().1, CompareOp::OpIs );
+            assert_eq!(compare_op(b"in"     ).unwrap().1, CompareOp::OpIn );
+            assert_eq!(compare_op(b"==/eq"  ).unwrap().1, CompareOp::OpEq );
+            assert_eq!(compare_op(b"!=/neq" ).unwrap().1, CompareOp::OpNeq);
+            assert_eq!(compare_op(b">="     ).unwrap().1, CompareOp::OpGte);
+            assert_eq!(compare_op(b"<="     ).unwrap().1, CompareOp::OpLte);
+            assert_eq!(compare_op(b"<"      ).unwrap().1, CompareOp::OpLt );
+            assert_eq!(compare_op(b">"      ).unwrap().1, CompareOp::OpGt );
+        }
+
+        #[test]
+        fn test_operator() {
+            assert_eq!(operator(b"or").unwrap().1, Operator::Or  );
+            assert_eq!(operator(b"and").unwrap().1, Operator::And );
+            assert_eq!(operator(b"xor").unwrap().1, Operator::Xor );
+        }
+
+        #[test]
+        fn test_function() {
+            assert_eq!(function(b"length").unwrap().1, Function::Length );
+            assert_eq!(function(b"keys").unwrap().1, Function::Keys );
+            assert_eq!(function(b"values").unwrap().1, Function::Values );
+        }
+
+        #[test]
+        fn test_integer() {
+            assert_eq!(integer(b"12").unwrap().1, 12);
+            assert_eq!(integer(b"11292").unwrap().1, 11292);
+            assert_eq!(integer(b"-12").unwrap().1, -12);
+            assert_eq!(integer(b"10101012").unwrap().1, 10101012);
+        }
+
+        #[test]
+        fn test_string() {
+            assert_eq!(string(b"\"foo\"").unwrap().1, "foo");
+        }
+
     }
 }
 
