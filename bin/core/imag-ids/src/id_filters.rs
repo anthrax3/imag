@@ -92,7 +92,6 @@ pub mod header_filter_lang {
     use std::process::exit;
 
     use nom::digit;
-    use nom::whitespace::sp;
 
     use libimagstore::store::Entry;
     use libimagerror::trace::MapErrTrace;
@@ -155,6 +154,7 @@ pub mod header_filter_lang {
         tag!("values") => { |_| Function::Values }
     ));
 
+    #[derive(Debug, PartialEq, Eq)]
     enum Value {
         Integer(i64),
         String(String),
@@ -191,9 +191,10 @@ pub mod header_filter_lang {
     ));
 
     named!(list_of_val<Vec<Value>>, do_parse!(
-            char!('[') >> list: many0!(val) >> char!(']') >> (list)
+            char!('[') >> list: many0!(terminated!(val, opt!(char!(',')))) >> char!(']') >> (list)
     ));
 
+    #[derive(Debug, PartialEq, Eq)]
     enum CompareValue {
         Value(Value),
         Values(Vec<Value>)
@@ -204,6 +205,7 @@ pub mod header_filter_lang {
         do_parse!(val: val >> (CompareValue::Value(val)))
     ));
 
+    #[derive(Debug, PartialEq, Eq)]
     enum Selector {
         Direct(String),
         Function(Function, String)
@@ -229,10 +231,11 @@ pub mod header_filter_lang {
     ));
 
     named!(selector<Selector>, alt_complete!(
-        do_parse!(fun: function >> sp >> sel: selector_str >> (Selector::Function(fun, sel))) |
+        do_parse!(fun: function >> sel: delimited!(char!('('), selector_str, char!(')')) >> (Selector::Function(fun, sel))) |
         do_parse!(sel: selector_str >> (Selector::Direct(sel)))
     ));
 
+    #[derive(Debug, PartialEq, Eq)]
     struct Filter {
         unary            : Option<Unary>,
         selector         : Selector,
@@ -253,6 +256,7 @@ pub mod header_filter_lang {
             })
     ));
 
+    #[derive(Debug, PartialEq, Eq)]
     pub struct Query {
         filter: Filter,
         next_filters: Vec<(Operator, Filter)>,
@@ -493,6 +497,55 @@ pub mod header_filter_lang {
             assert_eq!(string(b"\"foo\"").unwrap().1, "foo");
         }
 
+        #[test]
+        fn test_val() {
+            assert_eq!(val(b"12").unwrap().1, Value::Integer(12));
+            assert_eq!(val(b"\"foobar\"").unwrap().1, Value::String(String::from("foobar")));
+        }
+
+        #[test]
+        fn test_list_of_val() {
+            {
+                let list = list_of_val(b"[]");
+                println!("list: {:?}", list);
+                let vals = list.unwrap().1;
+                assert_eq!(vals, vec![]);
+            }
+
+            {
+                let list = list_of_val(b"[1]");
+                println!("list: {:?}", list);
+                let vals = list.unwrap().1;
+                assert_eq!(vals, vec![Value::Integer(1)]);
+            }
+
+            {
+                let list = list_of_val(b"[12,13]");
+                println!("list: {:?}", list);
+                let vals = list.unwrap().1;
+                assert_eq!(vals, vec![Value::Integer(12), Value::Integer(13)]);
+            }
+
+            {
+                let vals = list_of_val(b"[\"foobar\",\"bazbaz\"]").unwrap().1;
+                let expt = vec![Value::String(String::from("foobar")),
+                                Value::String(String::from("bazbaz"))];
+                assert_eq!(vals, expt)
+            }
+        }
+
+        #[test]
+        fn test_selector_str() {
+            assert_eq!(selector_str(b"foo.bar baz").unwrap().1, String::from("foo.bar"));
+        }
+
+        #[test]
+        fn test_selector() {
+            assert_eq!(selector(b"foo.bar baz").unwrap().1, Selector::Direct(String::from("foo.bar")));
+
+            let exp = Selector::Function(Function::Length, String::from("foo.bar"));
+            assert_eq!(selector(b"length(foo.bar)").unwrap().1, exp);
+        }
     }
 }
 
