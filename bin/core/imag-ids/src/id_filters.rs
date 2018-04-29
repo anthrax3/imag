@@ -181,7 +181,7 @@ pub mod header_filter_lang {
     })));
 
     named!(string<String>, do_parse!(
-       text: delimited!(char!('('), is_not!(")"), char!(')'))
+       text: delimited!(char!('"'), is_not!("\""), char!('"'))
        >> (String::from_utf8(text.to_vec()).unwrap())
     ));
 
