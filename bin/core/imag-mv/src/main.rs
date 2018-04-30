@@ -92,6 +92,7 @@ fn main() {
             .get_internal_links()
             .map_err_trace_exit_unwrap(1)
             .map(|link| link.get_store_id().clone())
+            .map(Ok)
             .into_get_iter(rt.store())
             .map(|e| {
                 e.map_err_trace_exit_unwrap(1)
