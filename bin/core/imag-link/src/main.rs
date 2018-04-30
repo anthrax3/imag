@@ -256,6 +256,7 @@ fn unlink(rt: &Runtime) {
         .collect::<Vec<PathBuf>>().into_iter() // for lifetime inference
         .map(StoreId::new_baseless)
         .unwrap_with(|e| { trace_error(&e); exit(1) })
+        .map(Ok)
         .into_get_iter(rt.store())
         .unwrap_with(|e| { trace_error(&e); exit(1) })
         .filter_map(|e| e)
