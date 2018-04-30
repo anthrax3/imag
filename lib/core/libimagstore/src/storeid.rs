@@ -62,11 +62,11 @@ impl StoreId {
     /// the `store_part` from the `full_path` succeeded.
     ///
     /// Returns a `StoreErrorKind::StoreIdBuildFromFullPathError` if stripping failes.
-    pub fn from_full_path<D>(store_part: &PathBuf, full_path: D) -> Result<StoreId>
+    pub fn from_full_path<D>(store_part: PathBuf, full_path: D) -> Result<StoreId>
         where D: Deref<Target = Path>
     {
         let p = full_path
-            .strip_prefix(store_part)
+            .strip_prefix(&store_part)
             .chain_err(|| SEK::StoreIdBuildFromFullPathError)?;
         StoreId::new(Some(store_part.clone()), PathBuf::from(p))
     }

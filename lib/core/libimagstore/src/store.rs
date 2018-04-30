@@ -113,7 +113,7 @@ impl Iterator for Walk {
                 } else /* if next.file_type().is_file() */ {
                     debug!("Found file...");
                     let n   = next.path().to_path_buf();
-                    let sid = match StoreId::from_full_path(&self.store_path, n) {
+                    let sid = match StoreId::from_full_path(self.store_path.clone(), n) {
                         Err(e) => {
                             debug!("Could not construct StoreId object from it");
                             trace_error(&e);
@@ -757,7 +757,7 @@ impl Store {
                     };
 
                     if is_file {
-                        let sid = StoreId::from_full_path(self.path(), element)?;
+                        let sid = StoreId::from_full_path(self.path().clone(), element)?;
                         elems.push(sid);
                     }
                 }
